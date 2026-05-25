@@ -31,7 +31,9 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -51,11 +53,14 @@ public class BitmapDisplayActivity extends Activity {
     private static final int CMD_SHOW       = 0x03;
     private static final int CMD_LOAD_COLOR = 0x04;
     private static final int CMD_INFO       = 0x05;
+    private static final int CMD_HIGHLIGHT       = 0x06;
+    private static final int CMD_CLEAR_HIGHLIGHTS = 0x07;
     private static final int RSP_PONG   = 0x81;
     private static final int RSP_LOADED = 0x82;
     private static final int RSP_SHOWN  = 0x83;
     private static final int RSP_ERROR  = 0x84;
     private static final int RSP_INFO   = 0x85;
+    private static final int RSP_HIGHLIGHT_ACK = 0x86;
 
     // camera stream (port 7777)
     private static final int CAM_PORT    = 7777;
@@ -75,6 +80,7 @@ public class BitmapDisplayActivity extends Activity {
     private volatile long pendingShowTimeNs;
     private final ConcurrentLinkedQueue<TexLoad> loadQueue = new ConcurrentLinkedQueue<>();
     private final LinkedBlockingQueue<byte[]> responseQueue = new LinkedBlockingQueue<>();
+    private final ConcurrentLinkedQueue<HighlightCmd> highlightQueue = new ConcurrentLinkedQueue<>();
 
     // ── camera ──
     private HandlerThread camThread;
@@ -201,6 +207,8 @@ public class BitmapDisplayActivity extends Activity {
                     case CMD_LOAD_COLOR: handleLoadColor(out, payload); break;
                     case CMD_LOAD_RGBA:  handleLoadRgba(out, payload);  break;
                     case CMD_SHOW:       handleShow(out, payload);      break;
+                    case CMD_HIGHLIGHT:       handleHighlight(out, payload);      break;
+                    case CMD_CLEAR_HIGHLIGHTS: handleClearHighlights(out, payload); break;
                     default:
                         sendResp(out, RSP_ERROR, ("unknown cmd " + cmd).getBytes());
                 }
@@ -209,6 +217,7 @@ public class BitmapDisplayActivity extends Activity {
             Log.i(TAG, "Display client gone: " + e.getMessage());
         } finally {
             responseQueue.clear();
+            highlightQueue.clear();
             pendingTexture = -1;
             try { client.close(); } catch (IOException ignored) {}
         }
@@ -268,6 +277,33 @@ public class BitmapDisplayActivity extends Activity {
         awaitAndForward(out, RSP_SHOWN, 5);
     }
 
+    private void handleHighlight(OutputStream out, byte[] payload) throws IOException {
+        ByteBuffer bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+        HighlightCmd hc = new HighlightCmd();
+        hc.x1 = bb.getFloat(); hc.y1 = bb.getFloat();
+        hc.x2 = bb.getFloat(); hc.y2 = bb.getFloat();
+        hc.r = (bb.get() & 0xFF) / 255f;
+        hc.g = (bb.get() & 0xFF) / 255f;
+        hc.b = (bb.get() & 0xFF) / 255f;
+        hc.a = (bb.get() & 0xFF) / 255f;
+        hc.showTimeNs = bb.getLong();
+        highlightQueue.add(hc);
+        ByteBuffer resp = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+        resp.putLong(hc.showTimeNs);
+        sendResp(out, RSP_HIGHLIGHT_ACK, resp.array());
+    }
+
+    private void handleClearHighlights(OutputStream out, byte[] payload) throws IOException {
+        ByteBuffer bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+        HighlightCmd hc = new HighlightCmd();
+        hc.isClear = true;
+        hc.showTimeNs = bb.getLong();
+        highlightQueue.add(hc);
+        ByteBuffer resp = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+        resp.putLong(hc.showTimeNs);
+        sendResp(out, RSP_HIGHLIGHT_ACK, resp.array());
+    }
+
     private void awaitAndForward(OutputStream out, int rsp, int sec) throws IOException {
         try {
             byte[] data = responseQueue.poll(sec, TimeUnit.SECONDS);
@@ -316,6 +352,13 @@ public class BitmapDisplayActivity extends Activity {
         TexLoad(int id, int w, int h, byte[] rgba) {
             this.id = id; this.width = w; this.height = h; this.rgba = rgba;
         }
+    }
+
+    static class HighlightCmd {
+        boolean isClear;
+        float x1, y1, x2, y2;
+        float r, g, b, a;
+        long showTimeNs;
     }
 
     // ═══════════════════════════════════ CAMERA STREAM ══
@@ -480,11 +523,19 @@ public class BitmapDisplayActivity extends Activity {
     // ═══════════════════════════════════ GL RENDERER ══
 
     private class FullScreenRenderer implements GLSurfaceView.Renderer {
+        // bitmap shader
         private int prog, aPos, aTC, uTex;
         private FloatBuffer posBuf, tcBuf;
         private final int[] texIds = new int[MAX_TEXTURES];
         private final boolean[] texOk = new boolean[MAX_TEXTURES];
         private int activeTex = -1;
+
+        // highlight shader
+        private int hlProg, hlAPos, hlUColor;
+        private FloatBuffer hlPosBuf;
+        private final ArrayList<float[]> activeHighlights = new ArrayList<>();
+
+        // timing
         private long lastNs;
         private volatile long framePeriodNs = 16_666_667L;
         private long fpSum;
@@ -498,6 +549,7 @@ public class BitmapDisplayActivity extends Activity {
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             GLES20.glDisable(GLES20.GL_DITHER);
 
+            // bitmap textured-quad program
             int vs = shader(GLES20.GL_VERTEX_SHADER,
                 "attribute vec4 aPos;" +
                 "attribute vec2 aTC;" +
@@ -516,10 +568,28 @@ public class BitmapDisplayActivity extends Activity {
             aTC  = GLES20.glGetAttribLocation(prog, "aTC");
             uTex = GLES20.glGetUniformLocation(prog, "uTex");
 
+            // solid-color program for highlight overlays
+            int hlVs = shader(GLES20.GL_VERTEX_SHADER,
+                "attribute vec4 aPos;" +
+                "void main(){gl_Position=aPos;}");
+            int hlFs = shader(GLES20.GL_FRAGMENT_SHADER,
+                "precision mediump float;" +
+                "uniform vec4 uColor;" +
+                "void main(){gl_FragColor=uColor;}");
+            hlProg = GLES20.glCreateProgram();
+            GLES20.glAttachShader(hlProg, hlVs);
+            GLES20.glAttachShader(hlProg, hlFs);
+            GLES20.glLinkProgram(hlProg);
+            hlAPos   = GLES20.glGetAttribLocation(hlProg, "aPos");
+            hlUColor = GLES20.glGetUniformLocation(hlProg, "uColor");
+
             posBuf = fb(new float[]{-1,-1, 1,-1, -1,1, 1,1});
             tcBuf  = fb(new float[]{ 0, 1, 1, 1,  0,0, 1,0});
+            hlPosBuf = ByteBuffer.allocateDirect(8 * 4)
+                .order(ByteOrder.nativeOrder()).asFloatBuffer();
 
             activeTex = -1;
+            activeHighlights.clear();
             for (int i = 0; i < MAX_TEXTURES; i++) texOk[i] = false;
             GLES20.glGenTextures(MAX_TEXTURES, texIds, 0);
             for (int i = 0; i < MAX_TEXTURES; i++) {
@@ -558,6 +628,7 @@ public class BitmapDisplayActivity extends Activity {
             }
             lastNs = now;
 
+            // upload queued textures
             TexLoad ld;
             while ((ld = loadQueue.poll()) != null) {
                 ByteBuffer px = ByteBuffer.allocateDirect(ld.rgba.length);
@@ -572,10 +643,10 @@ public class BitmapDisplayActivity extends Activity {
                 responseQueue.offer(r.array());
             }
 
+            // check pending texture swap
             int pt = pendingTexture;
             if (pt >= 0 && pt < MAX_TEXTURES && texOk[pt]) {
                 long target = pendingShowTimeNs;
-                // 2-frame pipeline: draw → compositor → scanout
                 long appear = now + 2 * framePeriodNs;
                 if (target == 0 || appear >= target) {
                     activeTex = pt;
@@ -586,6 +657,24 @@ public class BitmapDisplayActivity extends Activity {
                 }
             }
 
+            // activate due highlight commands
+            long appear = now + 2 * framePeriodNs;
+            Iterator<HighlightCmd> it = highlightQueue.iterator();
+            while (it.hasNext()) {
+                HighlightCmd hc = it.next();
+                if (hc.showTimeNs == 0 || appear >= hc.showTimeNs) {
+                    it.remove();
+                    if (hc.isClear) {
+                        activeHighlights.clear();
+                    } else {
+                        activeHighlights.add(new float[]{
+                            hc.x1, hc.y1, hc.x2, hc.y2,
+                            hc.r, hc.g, hc.b, hc.a});
+                    }
+                }
+            }
+
+            // draw bitmap
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
             if (activeTex >= 0 && texOk[activeTex]) {
                 GLES20.glUseProgram(prog);
@@ -599,6 +688,32 @@ public class BitmapDisplayActivity extends Activity {
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
                 GLES20.glDisableVertexAttribArray(aPos);
                 GLES20.glDisableVertexAttribArray(aTC);
+            }
+
+            // draw highlight overlays
+            if (!activeHighlights.isEmpty()) {
+                GLES20.glEnable(GLES20.GL_BLEND);
+                GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+                GLES20.glUseProgram(hlProg);
+                GLES20.glEnableVertexAttribArray(hlAPos);
+                for (float[] hl : activeHighlights) {
+                    float l = Math.min(hl[0], hl[2]) * 2f - 1f;
+                    float r2 = Math.max(hl[0], hl[2]) * 2f - 1f;
+                    float t = 1f - Math.min(hl[1], hl[3]) * 2f;
+                    float b = 1f - Math.max(hl[1], hl[3]) * 2f;
+                    hlPosBuf.clear();
+                    hlPosBuf.put(l); hlPosBuf.put(b);
+                    hlPosBuf.put(r2); hlPosBuf.put(b);
+                    hlPosBuf.put(l); hlPosBuf.put(t);
+                    hlPosBuf.put(r2); hlPosBuf.put(t);
+                    hlPosBuf.position(0);
+                    GLES20.glVertexAttribPointer(hlAPos, 2, GLES20.GL_FLOAT,
+                        false, 0, hlPosBuf);
+                    GLES20.glUniform4f(hlUColor, hl[4], hl[5], hl[6], hl[7]);
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+                }
+                GLES20.glDisableVertexAttribArray(hlAPos);
+                GLES20.glDisable(GLES20.GL_BLEND);
             }
         }
 

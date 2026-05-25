@@ -28,17 +28,20 @@ import socket
 import struct
 import time
 
-CMD_PING       = 0x01
-CMD_LOAD_RGBA  = 0x02
-CMD_SHOW       = 0x03
-CMD_LOAD_COLOR = 0x04
-CMD_INFO       = 0x05
+CMD_PING             = 0x01
+CMD_LOAD_RGBA        = 0x02
+CMD_SHOW             = 0x03
+CMD_LOAD_COLOR       = 0x04
+CMD_INFO             = 0x05
+CMD_HIGHLIGHT        = 0x06
+CMD_CLEAR_HIGHLIGHTS = 0x07
 
-RSP_PONG   = 0x81
-RSP_LOADED = 0x82
-RSP_SHOWN  = 0x83
-RSP_ERROR  = 0x84
-RSP_INFO   = 0x85
+RSP_PONG          = 0x81
+RSP_LOADED        = 0x82
+RSP_SHOWN         = 0x83
+RSP_ERROR         = 0x84
+RSP_INFO          = 0x85
+RSP_HIGHLIGHT_ACK = 0x86
 
 
 class DisplayController:
@@ -157,6 +160,38 @@ class DisplayController:
         _shown_id, _sched_ns, actual_ns = struct.unpack("<Iqq", payload)
         return self.tablet_to_pc_ns(actual_ns)
 
+    # ── highlights ──
+
+    def add_highlight(self, x1, y1, x2, y2, target_pc_ns=0,
+                      color=(255, 220, 0, 77)):
+        """Add a highlight rectangle overlay.
+
+        Coordinates are normalized [0.0, 1.0] where (0,0) = top-left,
+        (1,1) = bottom-right. Any two opposite corners work (order doesn't
+        matter). Color is (R, G, B, A) with A controlling transparency.
+        ACK is immediate; the rectangle appears at the target VSYNC.
+        """
+        tablet_t = self.pc_to_tablet_ns(target_pc_ns) if target_pc_ns else 0
+        r, g, b, a = color
+        payload = struct.pack("<ffffBBBBq", x1, y1, x2, y2, r, g, b, a, tablet_t)
+        self._send(CMD_HIGHLIGHT, payload)
+        cmd, _ = self._recv()
+        assert cmd == RSP_HIGHLIGHT_ACK
+
+    def add_highlight_px(self, x1, y1, x2, y2, bmp_w, bmp_h,
+                         target_pc_ns=0, color=(255, 220, 0, 77)):
+        """Like add_highlight but coordinates are in bitmap pixels."""
+        self.add_highlight(x1 / bmp_w, y1 / bmp_h,
+                           x2 / bmp_w, y2 / bmp_h,
+                           target_pc_ns, color)
+
+    def clear_highlights(self, target_pc_ns=0):
+        """Remove all highlight overlays at the target time (0 = immediate)."""
+        tablet_t = self.pc_to_tablet_ns(target_pc_ns) if target_pc_ns else 0
+        self._send(CMD_CLEAR_HIGHLIGHTS, struct.pack("<q", tablet_t))
+        cmd, _ = self._recv()
+        assert cmd == RSP_HIGHLIGHT_ACK
+
 
 def demo():
     print("Connecting to tablet (port 8888)...")
@@ -201,6 +236,32 @@ def demo():
     print(f"\n  Mean |error|: {mean_err:.1f} us,  max |error|: {max_err:.1f} us")
     print(f"  (Bounded by VSYNC period: {fp/1000:.0f} us)")
 
+    # ── highlight demo ──
+    print("\nHighlight overlay demo:")
+    dc.load_color(5, 240, 240, 240)  # light gray "score" background
+    dc.show(5)
+    time.sleep(0.3)
+
+    print("  Sweeping highlight left-to-right (simulating score playback)...")
+    steps = 20
+    for i in range(steps):
+        x_right = (i + 1) / steps
+        dc.clear_highlights()
+        dc.add_highlight(0.0, 0.0, x_right, 1.0)
+        time.sleep(0.15)
+
+    print("  Scheduled highlight with precise timing...")
+    dc.clear_highlights()
+    for i in range(10):
+        t = time.perf_counter_ns() + (i + 1) * 200_000_000  # every 200ms
+        x_right = (i + 1) / 10
+        if i > 0:
+            dc.clear_highlights(target_pc_ns=t)
+        dc.add_highlight(0.0, 0.2, x_right, 0.8, target_pc_ns=t)
+    print("  Queued 10 timed highlights — watching...")
+    time.sleep(2.5)
+
+    dc.clear_highlights()
     dc.show(1)  # end on black
     dc.close()
     print("Done.")
