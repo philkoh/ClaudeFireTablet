@@ -35,6 +35,7 @@ CMD_LOAD_COLOR       = 0x04
 CMD_INFO             = 0x05
 CMD_HIGHLIGHT        = 0x06
 CMD_CLEAR_HIGHLIGHTS = 0x07
+CMD_HIGHLIGHT_ANIM   = 0x08
 
 RSP_PONG          = 0x81
 RSP_LOADED        = 0x82
@@ -191,6 +192,36 @@ class DisplayController:
         self._send(CMD_CLEAR_HIGHLIGHTS, struct.pack("<q", tablet_t))
         cmd, _ = self._recv()
         assert cmd == RSP_HIGHLIGHT_ACK
+
+    def add_highlight_anim(self, x_start, y_top, x_end, y_bot,
+                           t_start_pc_ns, t_end_pc_ns,
+                           color=(255, 220, 0, 60)):
+        """Add a smoothly animated highlight that grows from x_start to x_end.
+
+        The rectangle's leading edge is at x_start at t_start and reaches
+        x_end at t_end. The tablet interpolates pixel-by-pixel at 60 fps
+        with zero USB traffic during playback.
+
+        Coordinates are normalized [0.0, 1.0].
+        """
+        r, g, b, a = color
+        t1 = self.pc_to_tablet_ns(t_start_pc_ns)
+        t2 = self.pc_to_tablet_ns(t_end_pc_ns)
+        payload = struct.pack("<ffffBBBBqq",
+                              x_start, y_top, x_end, y_bot,
+                              r, g, b, a, t1, t2)
+        self._send(CMD_HIGHLIGHT_ANIM, payload)
+        cmd, _ = self._recv()
+        assert cmd == RSP_HIGHLIGHT_ACK
+
+    def add_highlight_anim_px(self, x_start, y_top, x_end, y_bot,
+                              bmp_w, bmp_h, t_start_pc_ns, t_end_pc_ns,
+                              color=(255, 220, 0, 60)):
+        """Like add_highlight_anim but with bitmap-pixel coordinates."""
+        self.add_highlight_anim(
+            x_start / bmp_w, y_top / bmp_h,
+            x_end / bmp_w, y_bot / bmp_h,
+            t_start_pc_ns, t_end_pc_ns, color)
 
 
 def demo():

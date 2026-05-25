@@ -279,46 +279,29 @@ def simulate_playback():
     beat_duration_ns = int(60 / bpm * 1_000_000_000)  # ns per quarter note
     total_beats = NUM_BARS * BEATS_PER_BAR
 
-    # Compute highlight x-positions for each beat (normalized)
-    beat_positions = []
-    for i in range(total_beats):
-        bar = i // BEATS_PER_BAR
-        beat = i % BEATS_PER_BAR
-        # Left edge of this beat
-        x_left = LEFT_MARGIN + bar * BAR_WIDTH + beat * BEAT_WIDTH
-        beat_positions.append(x_left / WIDTH)
-
-    # Right edge of the last beat
+    # Highlight boundaries (normalized)
+    x_start = LEFT_MARGIN / WIDTH
     x_end = (LEFT_MARGIN + NUM_BARS * BAR_WIDTH) / WIDTH
-
-    # Highlight covers the staff area vertically (with some padding)
     hl_top = (TREBLE_TOP_Y - 15) / HEIGHT
     hl_bot = (BASS_TOP_Y + 4 * LINE_SP + 15) / HEIGHT
 
+    total_duration = total_beats * beat_duration_ns
+    start_time = time.perf_counter_ns() + 500_000_000  # start in 500ms
+    end_time = start_time + total_duration
+
     print(f"\nPlaying at {bpm} BPM ({beat_duration_ns/1e6:.0f} ms/beat)...")
-    print(f"  Total duration: {total_beats * beat_duration_ns / 1e9:.1f} seconds")
+    print(f"  Total duration: {total_duration / 1e9:.1f} seconds")
     print()
 
-    # Schedule all highlights ahead of time for precise timing
-    start_time = time.perf_counter_ns() + 500_000_000  # start in 500ms
-
-    # Queue up a clear + highlight for each beat
-    for i in range(total_beats):
-        t = start_time + i * beat_duration_ns
-        x_right = beat_positions[i + 1] if i + 1 < total_beats else x_end
-
-        # Clear previous and add new expanded highlight
-        dc.clear_highlights(target_pc_ns=t)
-        dc.add_highlight(
-            beat_positions[0], hl_top,  # left edge stays at start
-            x_right, hl_bot,            # right edge advances
-            target_pc_ns=t,
-            color=(255, 220, 0, 60)     # semi-transparent yellow
-        )
-
-    # Print progress while waiting
-    total_duration = total_beats * beat_duration_ns
-    end_time = start_time + total_duration
+    # One animation command — tablet interpolates at 60fps, zero USB traffic
+    dc.add_highlight_anim(
+        x_start, hl_top,
+        x_end, hl_bot,
+        t_start_pc_ns=start_time,
+        t_end_pc_ns=end_time,
+        color=(255, 220, 0, 60)
+    )
+    print("  Single animation queued — tablet renders pixel-smooth sweep")
     bar_names = ["bar 1: E E F G", "bar 2: G F E D",
                  "bar 3: C C D E", "bar 4: E D D .",
                  "bar 5: E E F G", "bar 6: G F E D",

@@ -55,6 +55,7 @@ public class BitmapDisplayActivity extends Activity {
     private static final int CMD_INFO       = 0x05;
     private static final int CMD_HIGHLIGHT       = 0x06;
     private static final int CMD_CLEAR_HIGHLIGHTS = 0x07;
+    private static final int CMD_HIGHLIGHT_ANIM  = 0x08;
     private static final int RSP_PONG   = 0x81;
     private static final int RSP_LOADED = 0x82;
     private static final int RSP_SHOWN  = 0x83;
@@ -81,6 +82,7 @@ public class BitmapDisplayActivity extends Activity {
     private final ConcurrentLinkedQueue<TexLoad> loadQueue = new ConcurrentLinkedQueue<>();
     private final LinkedBlockingQueue<byte[]> responseQueue = new LinkedBlockingQueue<>();
     private final ConcurrentLinkedQueue<HighlightCmd> highlightQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<HighlightAnim> animQueue = new ConcurrentLinkedQueue<>();
 
     // ── camera ──
     private HandlerThread camThread;
@@ -209,6 +211,7 @@ public class BitmapDisplayActivity extends Activity {
                     case CMD_SHOW:       handleShow(out, payload);      break;
                     case CMD_HIGHLIGHT:       handleHighlight(out, payload);      break;
                     case CMD_CLEAR_HIGHLIGHTS: handleClearHighlights(out, payload); break;
+                    case CMD_HIGHLIGHT_ANIM:  handleHighlightAnim(out, payload);  break;
                     default:
                         sendResp(out, RSP_ERROR, ("unknown cmd " + cmd).getBytes());
                 }
@@ -218,6 +221,7 @@ public class BitmapDisplayActivity extends Activity {
         } finally {
             responseQueue.clear();
             highlightQueue.clear();
+            animQueue.clear();
             pendingTexture = -1;
             try { client.close(); } catch (IOException ignored) {}
         }
@@ -304,6 +308,23 @@ public class BitmapDisplayActivity extends Activity {
         sendResp(out, RSP_HIGHLIGHT_ACK, resp.array());
     }
 
+    private void handleHighlightAnim(OutputStream out, byte[] payload) throws IOException {
+        ByteBuffer bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+        HighlightAnim ha = new HighlightAnim();
+        ha.x1 = bb.getFloat(); ha.y1 = bb.getFloat();
+        ha.x2 = bb.getFloat(); ha.y2 = bb.getFloat();
+        ha.r = (bb.get() & 0xFF) / 255f;
+        ha.g = (bb.get() & 0xFF) / 255f;
+        ha.b = (bb.get() & 0xFF) / 255f;
+        ha.a = (bb.get() & 0xFF) / 255f;
+        ha.startNs = bb.getLong();
+        ha.endNs = bb.getLong();
+        animQueue.add(ha);
+        ByteBuffer resp = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+        resp.putLong(ha.startNs);
+        sendResp(out, RSP_HIGHLIGHT_ACK, resp.array());
+    }
+
     private void awaitAndForward(OutputStream out, int rsp, int sec) throws IOException {
         try {
             byte[] data = responseQueue.poll(sec, TimeUnit.SECONDS);
@@ -359,6 +380,12 @@ public class BitmapDisplayActivity extends Activity {
         float x1, y1, x2, y2;
         float r, g, b, a;
         long showTimeNs;
+    }
+
+    static class HighlightAnim {
+        float x1, y1, x2, y2;
+        float r, g, b, a;
+        long startNs, endNs;
     }
 
     // ═══════════════════════════════════ CAMERA STREAM ══
@@ -534,6 +561,7 @@ public class BitmapDisplayActivity extends Activity {
         private int hlProg, hlAPos, hlUColor;
         private FloatBuffer hlPosBuf;
         private final ArrayList<float[]> activeHighlights = new ArrayList<>();
+        private final ArrayList<HighlightAnim> activeAnims = new ArrayList<>();
 
         // timing
         private long lastNs;
@@ -590,6 +618,7 @@ public class BitmapDisplayActivity extends Activity {
 
             activeTex = -1;
             activeHighlights.clear();
+            activeAnims.clear();
             for (int i = 0; i < MAX_TEXTURES; i++) texOk[i] = false;
             GLES20.glGenTextures(MAX_TEXTURES, texIds, 0);
             for (int i = 0; i < MAX_TEXTURES; i++) {
@@ -666,12 +695,19 @@ public class BitmapDisplayActivity extends Activity {
                     it.remove();
                     if (hc.isClear) {
                         activeHighlights.clear();
+                        activeAnims.clear();
                     } else {
                         activeHighlights.add(new float[]{
                             hc.x1, hc.y1, hc.x2, hc.y2,
                             hc.r, hc.g, hc.b, hc.a});
                     }
                 }
+            }
+
+            // drain new animations into active list
+            HighlightAnim ha;
+            while ((ha = animQueue.poll()) != null) {
+                activeAnims.add(ha);
             }
 
             // draw bitmap
@@ -690,31 +726,55 @@ public class BitmapDisplayActivity extends Activity {
                 GLES20.glDisableVertexAttribArray(aTC);
             }
 
-            // draw highlight overlays
-            if (!activeHighlights.isEmpty()) {
+            // draw highlight overlays (static + animated)
+            boolean hasOverlays = !activeHighlights.isEmpty() || !activeAnims.isEmpty();
+            if (hasOverlays) {
                 GLES20.glEnable(GLES20.GL_BLEND);
                 GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
                 GLES20.glUseProgram(hlProg);
                 GLES20.glEnableVertexAttribArray(hlAPos);
+
+                // static highlights
                 for (float[] hl : activeHighlights) {
-                    float l = Math.min(hl[0], hl[2]) * 2f - 1f;
-                    float r2 = Math.max(hl[0], hl[2]) * 2f - 1f;
-                    float t = 1f - Math.min(hl[1], hl[3]) * 2f;
-                    float b = 1f - Math.max(hl[1], hl[3]) * 2f;
-                    hlPosBuf.clear();
-                    hlPosBuf.put(l); hlPosBuf.put(b);
-                    hlPosBuf.put(r2); hlPosBuf.put(b);
-                    hlPosBuf.put(l); hlPosBuf.put(t);
-                    hlPosBuf.put(r2); hlPosBuf.put(t);
-                    hlPosBuf.position(0);
-                    GLES20.glVertexAttribPointer(hlAPos, 2, GLES20.GL_FLOAT,
-                        false, 0, hlPosBuf);
-                    GLES20.glUniform4f(hlUColor, hl[4], hl[5], hl[6], hl[7]);
-                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+                    drawHlQuad(hl[0], hl[1], hl[2], hl[3], hl[4], hl[5], hl[6], hl[7]);
                 }
+
+                // animated highlights — interpolate x between edges
+                for (HighlightAnim an : activeAnims) {
+                    if (appear < an.startNs) continue;
+                    float progress;
+                    long span = an.endNs - an.startNs;
+                    if (span <= 0 || appear >= an.endNs) {
+                        progress = 1f;
+                    } else {
+                        progress = (float)(appear - an.startNs) / (float) span;
+                    }
+                    float curX = an.x1 + (an.x2 - an.x1) * progress;
+                    drawHlQuad(an.x1, an.y1, curX, an.y2, an.r, an.g, an.b, an.a);
+                }
+
                 GLES20.glDisableVertexAttribArray(hlAPos);
                 GLES20.glDisable(GLES20.GL_BLEND);
             }
+        }
+
+        private void drawHlQuad(float nx1, float ny1, float nx2, float ny2,
+                                float cr, float cg, float cb, float ca) {
+            float l = Math.min(nx1, nx2) * 2f - 1f;
+            float r2 = Math.max(nx1, nx2) * 2f - 1f;
+            float t = 1f - Math.min(ny1, ny2) * 2f;
+            float b = 1f - Math.max(ny1, ny2) * 2f;
+            if (r2 - l < 0.001f) return;
+            hlPosBuf.clear();
+            hlPosBuf.put(l);  hlPosBuf.put(b);
+            hlPosBuf.put(r2); hlPosBuf.put(b);
+            hlPosBuf.put(l);  hlPosBuf.put(t);
+            hlPosBuf.put(r2); hlPosBuf.put(t);
+            hlPosBuf.position(0);
+            GLES20.glVertexAttribPointer(hlAPos, 2, GLES20.GL_FLOAT,
+                false, 0, hlPosBuf);
+            GLES20.glUniform4f(hlUColor, cr, cg, cb, ca);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
         }
 
         private int shader(int type, String src) {
