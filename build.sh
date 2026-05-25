@@ -16,8 +16,15 @@ APK_ALIGNED=$OUT/app-aligned.apk
 APK=$OUT/app-debug.apk
 KEYSTORE=$OUT/debug.keystore
 
+# preserve keystore across builds
+if [ -f $KEYSTORE ]; then
+  cp $KEYSTORE /tmp/_debug.keystore.bak
+fi
 rm -rf $OUT
 mkdir -p $OUT/gen $OUT/obj $OUT/dex
+if [ -f /tmp/_debug.keystore.bak ]; then
+  mv /tmp/_debug.keystore.bak $KEYSTORE
+fi
 
 echo "==> aapt2 compile resources"
 $BT/aapt2 compile --dir res -o $OUT/res.zip
