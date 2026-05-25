@@ -1,0 +1,4 @@
+- [Fire tablet project setup](project_fire_tablet.md) — Android dev pipeline targeting a USB-connected Fire HD 10 Plus 11th gen at /home/phil/ClaudeFireTablet
+- [User's Fire tablet hardware](user_fire_tablet.md) — Fire HD 10 Plus 11th gen, Fire OS 7.3.2.7, codename "trona" (KFTRPWI)
+- [Feedback: no hedging](feedback_no_hedging.md) — user dislikes "maybe X, maybe Y" answers; do web research and commit to one
+- [Android dev toolchain](reference_android_sdk.md) — SDK location, build tools, gradle-free build script
