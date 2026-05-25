@@ -12,6 +12,9 @@ import android.hardware.camera2.CaptureRequest;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
@@ -19,9 +22,14 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.Surface;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.Toast;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -73,6 +81,27 @@ public class BitmapDisplayActivity extends Activity {
     private volatile boolean running;
     private int screenWidth, screenHeight;
 
+    // ── menu ──
+    private FrameLayout menuOverlay;
+    private LinearLayout menuGrid;
+    private String currentMenuName = "main";
+
+    private static final String[][] MENU_MAIN = {
+        {"Play",     "Pause",     "Stop",       "Restart"},
+        {"Slower",   "Faster",    "Tempo >",    "Settings >"},
+        {"Page Up",  "Page Down", "Bookmark",   "Close"},
+    };
+    private static final String[][] MENU_TEMPO = {
+        {"60 BPM",   "80 BPM",    "100 BPM",    "120 BPM"},
+        {"140 BPM",  "160 BPM",   "Slower",     "Faster"},
+        {"Tap Tempo", "",         "< Back",      "Close"},
+    };
+    private static final String[][] MENU_SETTINGS = {
+        {"Bright +",  "Bright -",  "Highlight Yellow", "Highlight Blue"},
+        {"Score +",   "Score -",   "Camera On/Off",    "Flip Camera"},
+        {"Reconnect", "",          "< Back",           "Close"},
+    };
+
     // ── display ──
     private GLSurfaceView glView;
     private FullScreenRenderer renderer;
@@ -118,7 +147,11 @@ public class BitmapDisplayActivity extends Activity {
         glView.setEGLContextClientVersion(2);
         glView.setRenderer(renderer);
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
-        setContentView(glView);
+
+        FrameLayout root = new FrameLayout(this);
+        root.addView(glView);
+        setupMenu(root);
+        setContentView(root);
 
         running = true;
         new Thread(this::runDispServer, "disp-server").start();
@@ -154,6 +187,125 @@ public class BitmapDisplayActivity extends Activity {
             | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
             | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
             | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+    }
+
+    // ── menu ──────────────────────────────────────────────────────────
+
+    private void setupMenu(FrameLayout root) {
+        // small trigger button in upper-left corner
+        Button trigger = new Button(this);
+        trigger.setText("MENU");
+        trigger.setTextSize(13);
+        trigger.setTextColor(0xDDFFFFFF);
+        trigger.setTypeface(Typeface.DEFAULT_BOLD);
+        trigger.setAllCaps(false);
+        GradientDrawable trigBg = new GradientDrawable();
+        trigBg.setColor(0x66444444);
+        trigBg.setCornerRadius(8);
+        trigger.setBackground(trigBg);
+        trigger.setPadding(24, 8, 24, 8);
+        trigger.setMinimumWidth(0);
+        trigger.setMinimumHeight(0);
+        trigger.setMinWidth(0);
+        trigger.setMinHeight(0);
+        trigger.setOnClickListener(v -> showMenu("main"));
+        FrameLayout.LayoutParams trigLp = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.TOP | Gravity.START);
+        trigLp.setMargins(20, 12, 0, 0);
+        root.addView(trigger, trigLp);
+
+        // fullscreen overlay (hidden)
+        menuOverlay = new FrameLayout(this);
+        menuOverlay.setBackgroundColor(0xDD000000);
+        menuOverlay.setVisibility(View.GONE);
+        menuOverlay.setClickable(true);
+        root.addView(menuOverlay, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // grid container centered with padding
+        menuGrid = new LinearLayout(this);
+        menuGrid.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout.LayoutParams gridLp = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT);
+        gridLp.setMargins(24, 24, 24, 24);
+        menuOverlay.addView(menuGrid, gridLp);
+    }
+
+    private void showMenu(String name) {
+        currentMenuName = name;
+        String[][] labels;
+        switch (name) {
+            case "tempo":    labels = MENU_TEMPO;    break;
+            case "settings": labels = MENU_SETTINGS; break;
+            default:         labels = MENU_MAIN;     break;
+        }
+        buildMenuGrid(labels);
+        menuOverlay.setVisibility(View.VISIBLE);
+    }
+
+    private void hideMenu() {
+        menuOverlay.setVisibility(View.GONE);
+        applyImmersive();
+    }
+
+    private void buildMenuGrid(String[][] labels) {
+        menuGrid.removeAllViews();
+        for (String[] row : labels) {
+            LinearLayout rowLayout = new LinearLayout(this);
+            rowLayout.setOrientation(LinearLayout.HORIZONTAL);
+            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+            rowLp.setMargins(0, 6, 0, 6);
+
+            for (String label : row) {
+                Button btn = makeMenuButton(label);
+                LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
+                btnLp.setMargins(6, 0, 6, 0);
+                rowLayout.addView(btn, btnLp);
+                if (label.isEmpty()) btn.setVisibility(View.INVISIBLE);
+            }
+            menuGrid.addView(rowLayout, rowLp);
+        }
+    }
+
+    private Button makeMenuButton(String label) {
+        Button btn = new Button(this);
+        btn.setText(label);
+        btn.setTextSize(22);
+        btn.setTextColor(Color.WHITE);
+        btn.setTypeface(Typeface.DEFAULT_BOLD);
+        btn.setAllCaps(false);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xDD3A3A3A);
+        bg.setCornerRadius(16);
+        bg.setStroke(2, 0xFF888888);
+        btn.setBackground(bg);
+        btn.setOnClickListener(v -> onMenuButton(label));
+        return btn;
+    }
+
+    private void onMenuButton(String label) {
+        Log.i(TAG, "Menu tap: " + label);
+        switch (label) {
+            case "Close":
+                hideMenu();
+                return;
+            case "< Back":
+                showMenu("main");
+                return;
+            case "Tempo >":
+                showMenu("tempo");
+                return;
+            case "Settings >":
+                showMenu("settings");
+                return;
+        }
+        Toast.makeText(this, label, Toast.LENGTH_SHORT).show();
     }
 
     @Override protected void onResume() { super.onResume(); glView.onResume(); }
