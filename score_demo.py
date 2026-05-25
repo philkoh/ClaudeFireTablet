@@ -269,6 +269,7 @@ def simulate_playback():
     print(f"  RTT: {rtt/1e6:.2f} ms")
 
     print("Uploading score image...")
+    dc.clear_highlights()
     dc.load_rgba(0, WIDTH, HEIGHT, rgba_data)
     dc.show(0)
     print("  Score displayed!")
