@@ -56,6 +56,8 @@ Message: `[1B cmd][4B LE payload_len][payload]`
 | 0x03 | SHOW | 4B id + 8B target_tablet_ns (0=now) | SHOWN: 4B id + 8B sched + 8B actual |
 | 0x04 | LOAD_COLOR | 4B id + R + G + B + A | LOADED |
 | 0x05 | INFO | (none) | 4B width + 4B height + 8B frame_period_ns |
+| 0x06 | HIGHLIGHT | 4x float coords [0,1] + RGBA + 8B time | ACK (immediate) |
+| 0x07 | CLEAR_HIGHLIGHTS | 8B target_time_ns | ACK (immediate) |
 
 ## Timing characteristics
 - Frame period: 16.696 ms (59.9 Hz measured)
