@@ -2,3 +2,5 @@
 - [User's Fire tablet hardware](user_fire_tablet.md) — Fire HD 10 Plus 11th gen, Fire OS 7.3.2.7, codename "trona" (KFTRPWI)
 - [Feedback: no hedging](feedback_no_hedging.md) — user dislikes "maybe X, maybe Y" answers; do web research and commit to one
 - [Android dev toolchain](reference_android_sdk.md) — SDK location, build tools, gradle-free build script
+- [Auto-commit standing order](feedback_auto_commit.md) — always commit/push/save memory after each successful feature autonomously
+- [GitHub repo info](project_github_repo.md) — philkoh/ClaudeFireTablet, deploy key setup, SSH push config
